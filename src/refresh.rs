@@ -116,11 +116,8 @@ pub async fn run(env: &Env) -> worker::Result<()> {
 }
 
 async fn fetch_json<T: serde::de::DeserializeOwned>(url: &str) -> worker::Result<T> {
-    let req = Request::new_with_init(
-        url,
-        RequestInit::new().with_method(Method::Get),
-    )
-    .map_err(|e| worker::Error::RustError(format!("build req {url}: {e}")))?;
+    let req = Request::new_with_init(url, RequestInit::new().with_method(Method::Get))
+        .map_err(|e| worker::Error::RustError(format!("build req {url}: {e}")))?;
     let mut resp = Fetch::Request(req)
         .send()
         .into_send()
@@ -163,7 +160,11 @@ fn parse_iata_suffix(name: &str) -> Option<(&str, &str)> {
     let open = name.rfind('(')?;
     let close = name.len() - 1;
     let code = &name[open + 1..close];
-    if code.len() != 3 || !code.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) {
+    if code.len() != 3
+        || !code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
         return None;
     }
     // base name = everything before the last " - " (the IATA suffix marker)

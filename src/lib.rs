@@ -41,11 +41,13 @@ async fn fetch(
 ) -> worker::Result<http::Response<ConnectRpcBody>> {
     // Plain health probe (skip RPC machinery for liveness checks).
     if req.uri().path() == "/healthz" {
-        return Ok(http::Response::builder()
+        return http::Response::builder()
             .status(200)
             .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
-            .body(ConnectRpcBody::Full(Full::new(bytes::Bytes::from_static(b"ok"))))
-            .map_err(|e| worker::Error::RustError(format!("healthz: {e}")))?);
+            .body(ConnectRpcBody::Full(Full::new(bytes::Bytes::from_static(
+                b"ok",
+            ))))
+            .map_err(|e| worker::Error::RustError(format!("healthz: {e}")));
     }
 
     let state = build_state(&env)?;

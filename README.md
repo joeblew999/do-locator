@@ -123,6 +123,44 @@ The first `scheduled` event won't fire until the next Monday. To bootstrap immed
 fnox exec -- wrangler triggers schedule do-locator
 ```
 
+## Sanity-check a deployed instance with curl
+
+ConnectRPC speaks plain HTTP+JSON; you don't need a generated client to verify a deployment.
+
+```bash
+URL=https://do-locator.<your-account>.workers.dev
+
+# Health probe (no RPC machinery)
+curl "$URL/healthz"
+
+# Snapshot metadata — version, total colos, with-hint count
+curl -X POST "$URL/locator.v1.LocatorService/GetSnapshot" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Single colo lookup
+curl -X POST "$URL/locator.v1.LocatorService/GetLocationHint" \
+  -H "Content-Type: application/json" \
+  -d '{"colo":"SYD"}'
+# → {"hint":"LOCATION_HINT_OC","known":true}
+
+# Full info
+curl -X POST "$URL/locator.v1.LocatorService/GetColoInfo" \
+  -H "Content-Type: application/json" \
+  -d '{"colo":"SYD"}'
+
+# List every colo (response is ~50KB — consumers cache this per isolate)
+curl -X POST "$URL/locator.v1.LocatorService/ListColos" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+If `GetSnapshot` returns `503` with "snapshot not yet populated", the cron hasn't run yet — kick it manually:
+
+```bash
+mise run kv:bootstrap
+```
+
 ## Refreshing locally
 
 The refresh pipeline runs **inside the Worker** — there's no nushell or Python codegen anymore. To test the logic:

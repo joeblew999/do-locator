@@ -1,0 +1,18 @@
+# Reference codegen config — generates @bufbuild-style ES TypeScript into
+# `gen/` when run from this directory:
+#
+#   npx -y @bufbuild/buf@latest generate
+#
+# Consumers vendoring this repo as a submodule usually want their OWN
+# buf.gen.yaml at their workspace root that points at this proto/ — see
+# examples/ts-client/README.md. This file exists so the schema can be
+# sanity-checked in this repo (CI runs `buf lint` against buf.yaml).
+version: v2
+inputs:
+  - directory: proto
+plugins:
+  - remote: buf.build/bufbuild/es:v2.2.3
+    out: gen
+    opt:
+      - target=ts
+      - import_extension=js

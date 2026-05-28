@@ -49,7 +49,7 @@ impl LocatorService for LocatorServer {
         request: OwnedGetLocationHintRequestView,
     ) -> ServiceResult<GetLocationHintResponse> {
         let snap = self.load_snapshot().await?;
-        let entry = snap.find(&request.colo);
+        let entry = snap.find(request.colo);
         let resp = GetLocationHintResponse {
             hint: hint_str_to_pb(entry.and_then(|e| e.nearest_region.as_deref())),
             known: entry.is_some(),
@@ -64,9 +64,12 @@ impl LocatorService for LocatorServer {
         request: OwnedGetColoInfoRequestView,
     ) -> ServiceResult<GetColoInfoResponse> {
         let snap = self.load_snapshot().await?;
-        let entry = snap.find(&request.colo);
+        let entry = snap.find(request.colo);
         let resp = GetColoInfoResponse {
-            colo: entry.map(entry_to_pb).map(MessageField::some).unwrap_or_default(),
+            colo: entry
+                .map(entry_to_pb)
+                .map(MessageField::some)
+                .unwrap_or_default(),
             known: entry.is_some(),
             ..Default::default()
         };
@@ -100,4 +103,3 @@ impl LocatorService for LocatorServer {
         Ok(Response::new(resp))
     }
 }
-

@@ -111,24 +111,24 @@ run = "fnox exec -- wrangler tail"
 [tasks."kv:create"]
 description = "Create the prod KV namespace (run once per env). Save the returned id with `fnox set -p keychain DO_LOCATOR_KV_NAMESPACE_ID <id>`."
 shell = "nu -c"
-run = "fnox exec -- wrangler kv:namespace create DO_LOCATOR_KV"
+run = "fnox exec -- wrangler kv namespace create DO_LOCATOR_KV"
 
 [tasks."kv:create:preview"]
 description = "Create the preview KV namespace. Save the returned id with `fnox set -p keychain DO_LOCATOR_KV_PREVIEW_ID <id>`."
 shell = "nu -c"
-run = "fnox exec -- wrangler kv:namespace create DO_LOCATOR_KV --preview"
+run = "fnox exec -- wrangler kv namespace create DO_LOCATOR_KV --preview"
 
 [tasks."kv:bootstrap"]
-description = "Trigger an immediate refresh of the deployed worker (POST to a wrangler-invoked scheduled run)."
+description = "Manually trigger the scheduled handler once (populates KV before next Monday's cron). Requires wrangler 4.18+."
 shell = "nu -c"
-run = "fnox exec -- wrangler triggers deploy --schedule '* * * * *'"
+run = "fnox exec -- wrangler triggers schedule do-locator"
 
 [tasks."kv:dump"]
 description = "Print the current snapshot blob from KV"
 shell = "nu -c"
 run = '''
 fnox exec -- bash -c '
-  wrangler kv:key get --namespace-id=$DO_LOCATOR_KV_NAMESPACE_ID snapshot
+  wrangler kv key get --namespace-id=$DO_LOCATOR_KV_NAMESPACE_ID snapshot
 '
 '''
 

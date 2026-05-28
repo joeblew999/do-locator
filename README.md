@@ -1,8 +1,34 @@
 # do-locator
 
-**A web service that tells you where to place a Cloudflare Durable Object so it's fast for your users.**
+## TL;DR
 
-Live at https://do-locator.gedw99.workers.dev
+When your Cloudflare app saves a user's data, the data has to live in some physical data center. If you pick a data center on the other side of the world from the user, every read and write to that data is slow (200ms+) for the rest of that user's life.
+
+This service tells you which data center to use, given where the user is. You ask it "user just arrived at the Sydney edge, where should I put their data?" — it answers "Oceania".
+
+That's it.
+
+---
+
+## The problem, with a concrete example
+
+A user in Sydney signs up to your app.
+
+Cloudflare runs your code at hundreds of edge data centers around the world. The Sydney user's request lands at the Sydney edge (`SYD`).
+
+Your app saves their account state in a thing called a **Durable Object** — Cloudflare's name for a per-user (or per-team, per-room, whatever) chunk of state. **A Durable Object lives in one specific region forever.** Once it's created, Cloudflare won't move it.
+
+If you accidentally create the DO in `wnam` (Western North America) instead of `oc` (Oceania), then every time the Sydney user reads or writes anything, the request flies from Sydney → North America → back. ~200ms each way. Forever.
+
+If you create it in `oc`, it stays near them. ~10ms.
+
+The only chance to get this right is **at the moment of creation**. So at signup time, you have to know: "given the edge they arrived at, what's the right region for their data?"
+
+That mapping (edge → region) isn't obvious. It comes from latency measurements, and it changes as Cloudflare adds new data centers.
+
+## What this service is
+
+A web service. You ask it "given edge X, what region should I use?" It answers.
 
 ```bash
 curl -X POST https://do-locator.gedw99.workers.dev/locator.v1.LocatorService/GetLocationHint \
@@ -11,128 +37,95 @@ curl -X POST https://do-locator.gedw99.workers.dev/locator.v1.LocatorService/Get
 # → {"hint":"LOCATION_HINT_OC","known":true}
 ```
 
-You give it a Cloudflare data-center code (the one in `request.cf.colo`, e.g. `SYD`, `LAX`, `FRA`). It tells you the best Durable Object region to place the DO in. Sydney → Oceania, LA → Western North America, Frankfurt → Eastern Europe.
+`SYD` is Sydney's edge code. `LOCATION_HINT_OC` is Oceania. Done.
 
-## Why this exists
+The data updates itself once a week from Cloudflare's own measurements at [where.durableobjects.live](https://where.durableobjects.live/).
 
-Durable Objects can be placed in specific regions via `locationHint` when you create them. **That hint is permanent.** Once a DO exists, it stays in that region for life. CF does not migrate DOs.
+## How you'd use it from your code
 
-- Pick the right region at creation → user's reads/writes stay sub-10ms forever.
-- Pick the wrong region → every read crosses an ocean, ~200ms forever.
-
-The mapping from "colo the user arrived through" → "best DO region" depends on measured latency between every CF colo and every DO region. The data shifts as CF adds POPs and reshuffles traffic. [Connor Hindley](https://github.com/connyay) (a CF engineer) maintains the measurements at [where.durableobjects.live](https://where.durableobjects.live/). This service turns those measurements into a stable, weekly-refreshed lookup with hysteresis (so noisy boundary flips don't churn the answers).
-
-**Why a service instead of a vendored library:** you have many Workers that all create DOs. One service means one weekly refresh, one observability surface, one update for all consumers when CF adds a new POP. Every consumer reads the same data via RPC and caches it locally per isolate.
-
-## How a consumer uses it
+You don't call this service every time a user signs up — that'd be slow and pointless. You call it **once when your Worker starts up**, cache the whole table in memory, then look up locally.
 
 ```ts
-import { createClient } from "@connectrpc/connect";
-import { createConnectTransport } from "@connectrpc/connect-web";
-import { LocatorService } from "./gen/locator/v1/locator_pb.js";
-
-// Once per isolate — populate a local map from the full snapshot:
-const client = createClient(LocatorService, createConnectTransport({
-  baseUrl: "https://do-locator.gedw99.workers.dev",
-}));
-const { colos } = await client.listColos({});
+// Once, at startup:
+const { colos } = await locator.listColos({});
 const HINTS = new Map(colos.map(c => [c.code, c.hint]));
 
-// Per request — O(1) local lookup, no RPC:
-const hint = HINTS.get(request.cf?.colo ?? "");
-env.USER_DO.newUniqueId({ locationHint: hintToString(hint) });
+// Every signup after that:
+const edgeCode = request.cf?.colo ?? "";
+const region   = HINTS.get(edgeCode);
+env.USER_DO.newUniqueId({ locationHint: region });
 ```
 
-That's the whole pattern. Don't call `GetLocationHint` per request — call `ListColos` once at isolate boot and cache.
+Three lines per signup, no network call. The full pattern (including how to handle unknown edges, and which kinds of DOs should NOT use the user's edge) is in [examples/ts-client/](examples/ts-client/README.md) and [examples/rust-client/](examples/rust-client/README.md).
 
-Worked examples (with the funnel-helper pattern, observability log, per-DO-type policy):
-- Rust: [examples/rust-client/README.md](examples/rust-client/README.md)
-- TS: [examples/ts-client/README.md](examples/ts-client/README.md)
+## The one footgun you have to know
 
-## The locationHint-is-permanent footgun
+The hint only matters **when you create the DO**. After that, the DO is stuck in that region forever — even if the user moves to another continent. So:
 
-Different DO types want different "colo sources" at creation:
+- **Per-user data** — use the user's edge at signup. Good. They'll mostly stay near where they signed up; even if they roam, the DO can't follow them anyway.
+- **Per-team / per-org data** — do NOT use the admin's edge. The admin might be in Singapore creating a US-based company. Let the team owner pick a region explicitly, or wait until the first real user touches it.
+- **Per-session / per-room** — use the creator's edge. Sessions are short-lived, so the creator's edge ≈ where it'll be used.
 
-| DO type | Use this colo source |
+Getting this wrong silently locks your customers into a slow path for the lifetime of their account.
+
+## Endpoints
+
+The service lives at https://do-locator.gedw99.workers.dev.
+
+| Endpoint | What it returns |
 |---|---|
-| Per-user state | `request.cf.colo` at signup. Sticky-good even if the user roams. |
-| Per-session / per-room | `request.cf.colo` at creation. Short-lived. |
-| Per-tenant / per-org | **NOT** the admin's request colo. Let the org owner pick a region, or defer creation to first end-user touch. |
-| Global singleton | Hardcode one hint. This service is irrelevant. |
+| `GET /healthz` | `ok` (liveness probe) |
+| `POST /__refresh` | Forces an immediate refresh of the table from upstream. Also runs automatically every Monday 03:00 UTC. |
+| `POST /locator.v1.LocatorService/GetLocationHint` `{"colo":"SYD"}` | The hint for one edge code. |
+| `POST /locator.v1.LocatorService/GetColoInfo` `{"colo":"FRA"}` | Full info for one edge (name, region, hint). |
+| `POST /locator.v1.LocatorService/ListColos` `{}` | The whole table. **This is the one consumers should actually call.** |
+| `POST /locator.v1.LocatorService/GetSnapshot` `{}` | Just metadata (date, total colos, count with hints). |
 
-Get the per-tenant case wrong and you'll pin every org user to wherever the admin happened to be sitting. Forever. Comment the *why* at your consumer's funnel helper so the next person doesn't "fix" it back to `request.cf.colo`.
+The service contract is in [proto/locator/v1/locator.proto](proto/locator/v1/locator.proto). Consumers vendor that file and run `connectrpc-build` (Rust) or `buf generate` (TS) to make a client.
 
-Also: `idFromName` does **not** honor `locationHint` once a DO with that name exists anywhere. Only `newUniqueId({ locationHint })` actually places a new DO.
-
-## RPCs
-
-All four are POST + JSON. The service definition is in [proto/locator/v1/locator.proto](proto/locator/v1/locator.proto).
+## Running it locally
 
 ```bash
-# Single lookup
-curl -X POST $URL/locator.v1.LocatorService/GetLocationHint \
+mise run worker:dev
+curl http://127.0.0.1:8787/__refresh
+curl -X POST http://127.0.0.1:8787/locator.v1.LocatorService/GetLocationHint \
   -H "Content-Type: application/json" -d '{"colo":"SYD"}'
-# → {"hint":"LOCATION_HINT_OC","known":true}
-
-# Full info for one colo
-curl -X POST $URL/locator.v1.LocatorService/GetColoInfo \
-  -H "Content-Type: application/json" -d '{"colo":"FRA"}'
-# → {"colo":{"code":"FRA","name":"Frankfurt, Germany","cfRegion":"Europe","hint":"LOCATION_HINT_EEUR"},"known":true}
-
-# Every colo + snapshot version (the call consumers actually use)
-curl -X POST $URL/locator.v1.LocatorService/ListColos \
-  -H "Content-Type: application/json" -d '{}'
-
-# Metadata only
-curl -X POST $URL/locator.v1.LocatorService/GetSnapshot \
-  -H "Content-Type: application/json" -d '{}'
-# → {"snapshot":{"version":"2026-05-28","totalColos":340,"colosWithHint":278}}
 ```
 
-Plus a plain `GET /healthz` for liveness probes.
+`wrangler dev --local` uses a local KV emulator, separate from prod.
 
-## Deploying your own
+## Deploying your own copy
+
+You shouldn't need to — just use the live one. But if you want your own:
 
 ```bash
 mise run mise:install
 fnox set -p keychain CLOUDFLARE_API_TOKEN <token>
 fnox set -p keychain CLOUDFLARE_ACCOUNT_ID <id>
 
-mise run kv:create               # → prints a namespace id
-mise run kv:create:preview       # → prints a preview id
-# Paste both ids into wrangler.toml's [[kv_namespaces]] block.
-# KV ids are not secrets; commit them.
+mise run kv:create               # prints an id
+mise run kv:create:preview       # prints another id
+# Paste both into wrangler.toml's [[kv_namespaces]] block.
 
-mise run worker:deploy           # build wasm + push
-curl https://<your-worker>/__refresh   # populate KV (also runs weekly via cron)
+mise run worker:deploy
+curl https://<your-worker>/__refresh   # fills the table for the first time
 ```
 
-## Running locally
+## How the weekly refresh works
 
-```bash
-mise run worker:dev          # wrangler dev --local on :8787
-curl http://127.0.0.1:8787/__refresh
-curl -X POST http://127.0.0.1:8787/locator.v1.LocatorService/GetLocationHint \
-  -H "Content-Type: application/json" -d '{"colo":"SYD"}'
-```
+A scheduled handler runs Mondays at 03:00 UTC, inside the same Worker:
 
-`wrangler dev --local` uses a local KV emulator — separate state from prod.
+1. Downloads the list of all Cloudflare edges from `cloudflarestatus.com`.
+2. Downloads measured latency between every edge and every DO region from `where.durableobjects.live`.
+3. For each edge, picks the region with lowest latency.
+4. **Hysteresis:** if the winning region changed since last week, only accept the change if the new region is at least 15ms (or 20%) faster than last week's pick. Stops the table from flapping between two regions that are nearly tied.
+5. Writes the new table to KV.
 
-## How the refresh works
-
-A scheduled handler runs Mondays at 03:00 UTC, in this same Worker:
-
-1. HTTP GET `cloudflarestatus.com/api/v2/components.json` (colo names + CF region groupings).
-2. HTTP GET `where.durableobjects.live/api/v3/data.json` (measured latency per colo per DO region).
-3. Merge into one record per colo.
-4. **Hysteresis:** if a colo's nearest region flipped vs the previous snapshot, only accept the flip if the new region is at least `max(15ms, 20%)` faster than the previously-chosen one. Region-boundary colos often differ by 2-3ms between regions and the raw winner bounces every refresh — this keeps the mapping stable.
-5. Write the new snapshot JSON to KV.
-
-To trigger a refresh outside the weekly schedule: `curl <url>/__refresh`. The data is public, so the endpoint is unauthenticated.
+That's the whole refresh. See [src/refresh.rs](src/refresh.rs).
 
 ## Credit
 
-Mapping data, the measurement infrastructure at [where.durableobjects.live](https://where.durableobjects.live/), and the hysteresis approach come from [Connor Hindley](https://github.com/connyay) (CF). His Rust crate [cf-colo-hint](https://github.com/connyay/cf-colo-hint) is the vendor-it-as-a-library alternative to this service.
+The latency measurements are work by [Connor Hindley](https://github.com/connyay), a Cloudflare engineer, at [where.durableobjects.live](https://where.durableobjects.live/). The hysteresis trick is ported from his Rust crate [cf-colo-hint](https://github.com/connyay/cf-colo-hint), which is the same thing as this service but as a static library you vendor — useful if you don't want to depend on another service.
 
 ## License
 

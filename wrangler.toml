@@ -15,8 +15,8 @@ command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
 #   5. mise run worker:deploy
 [[kv_namespaces]]
 binding = "DO_LOCATOR_KV"
-id = ""             # ← paste id from `mise run kv:create`
-preview_id = ""     # ← paste id from `mise run kv:create:preview`
+id = "9f0040f9777345979259197ea55274b8"
+preview_id = "ee1c6129d3f54e1198aa0ab5b345fef4"
 
 [vars]
 # KV key under which the snapshot JSON lives. Override per env if you

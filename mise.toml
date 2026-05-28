@@ -3,7 +3,7 @@ rust = "stable"
 "aqua:nushell/nushell" = "latest"
 
 # Cloudflare Workers CLI: dev + deploys. Drives worker-build.
-"npm:wrangler" = "latest"
+"npm:wrangler" = "4.90.1"
 
 # Rust → wasm32 bundler invoked by wrangler.
 "cargo:worker-build" = "latest"

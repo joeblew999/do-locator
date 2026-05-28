@@ -50,6 +50,23 @@ async fn fetch(
             .map_err(|e| worker::Error::RustError(format!("healthz: {e}")));
     }
 
+    // Manual refresh trigger — same logic as the weekly cron. Useful for
+    // bootstrapping KV after first deploy. The data is public so we don't
+    // gate this; worst case someone hits it spuriously and we re-fetch
+    // upstream once.
+    if req.uri().path() == "/__refresh" {
+        return match refresh::run(&env).await {
+            Ok(()) => http::Response::builder()
+                .status(200)
+                .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(ConnectRpcBody::Full(Full::new(bytes::Bytes::from_static(
+                    b"refreshed",
+                ))))
+                .map_err(|e| worker::Error::RustError(format!("refresh: {e}"))),
+            Err(e) => Err(worker::Error::RustError(format!("refresh failed: {e}"))),
+        };
+    }
+
     let state = build_state(&env)?;
     let router = RpcRouter::new();
     let router = Arc::new(LocatorServer::new(Arc::clone(&state))).register(router);

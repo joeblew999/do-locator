@@ -1,176 +1,138 @@
 # do-locator
 
-**Cloudflare colo → Durable Objects `locationHint` lookup service. ConnectRPC on Workers, KV-backed, weekly refresh.**
+**A web service that tells you where to place a Cloudflare Durable Object so it's fast for your users.**
 
-When a Worker creates a Durable Object, passing a `locationHint` places the DO close to the requesting user. The hint is permanent — DOs do not migrate. Picking it well at creation time is the difference between sub-10ms reads and cross-region round-trips.
-
-This service is the single runtime source of truth for that mapping across every consuming Worker. One service, one KV blob, many ConnectRPC consumers.
-
-## Architecture
-
-```
-                    Layer 0  upstream (CF / Connor Hindley)
-                              │
-                ┌─────────────┴─────────────┐
-                ▼                           ▼
-     cloudflarestatus.com           where.durableobjects.live
-                │                           │
-                └──────────┬────────────────┘
-                           ▼
-        ┌────────────────────────────────────────┐
-        │  Layer 1  scheduled refresh (weekly)   │
-        │  src/refresh.rs                        │
-        │  Mondays 03:00 UTC, in this Worker     │
-        │  - HTTP GET both upstreams             │
-        │  - merge + hysteresis vs prev snapshot │
-        │  - KV PUT new snapshot                 │
-        └────────────────────────────────────────┘
-                           │
-                           ▼
-        ┌────────────────────────────────────────┐
-        │  Layer 2  KV blob "snapshot"           │
-        │  ~50KB JSON, ~340 colos, weekly diff   │
-        └────────────────────────────────────────┘
-                           │
-                           ▼
-        ┌────────────────────────────────────────┐
-        │  Layer 3  ConnectRPC service           │
-        │  src/service.rs                        │
-        │  - GetLocationHint(colo) → hint        │
-        │  - GetColoInfo(colo)     → full info   │
-        │  - ListColos()           → all colos   │
-        │  - GetSnapshot()         → metadata    │
-        └────────────────────────────────────────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-       consumer-1     consumer-2    consumer-N
-        (Rust)         (TS)          (any lang
-        Worker         Worker        with proto)
-```
-
-## Consumer pattern
-
-**Don't RPC us per request.** Call `ListColos` once at isolate init, cache in memory, do all per-request lookups locally. The data changes weekly at most.
-
-- Rust example: [examples/rust-client/](examples/rust-client/README.md)
-- TS example: [examples/ts-client/](examples/ts-client/README.md)
-
-Both examples include the **DO-creation funnel** pattern (one helper per consumer Worker, all `idFromName`/`newUniqueId` go through it) and the **observability log** every consumer should emit.
-
-## Critical: locationHint is PERMANENT
-
-`locationHint` applies only at DO **creation**. DOs do not migrate. Consequences:
-
-| DO type | Right colo source at creation |
-|---|---|
-| Per-user state | `request.cf.colo` at signup — user's home colo is sticky-good even if they roam. |
-| Per-session / per-room | `request.cf.colo` at creation. Short-lived so creation-colo ≈ usage-colo. |
-| Per-tenant / per-org | **NOT** `request.cf.colo` of the admin. Use explicit region from owner, billing-address inference, or defer creation to first end-user touch. |
-| Globally shared singleton | Hardcode one hint. This service is irrelevant. |
-
-Comment the *why* at the funnel helper site. Someone six months later will "fix" it to always use `request.cf.colo` and silently mis-locate every tenant DO.
-
-`idFromName` is deterministic across colos and effectively ignores the hint once any DO with that name has been created anywhere. Hints only bind at `newUniqueId({ locationHint })`.
-
-## Hysteresis
-
-Region nearest-neighbour latencies often differ by only a few ms for colos at region boundaries — the raw upstream winner flaps between refreshes. The refresh handler keeps the previous decision unless the new region is at least `max(15ms, 20%)` faster. Logic ported from [connyay/cf-colo-hint](https://github.com/connyay/cf-colo-hint).
-
-## Repo layout
-
-```
-do-locator/
-├── proto/
-│   └── locator/v1/locator.proto    Service contract; consumers vendor + codegen
-├── src/
-│   ├── lib.rs                      fetch + scheduled event handlers
-│   ├── service.rs                  LocatorService impl
-│   ├── refresh.rs                  download + hysteresis + KV put
-│   ├── snapshot.rs                 KV blob shape + proto conversions
-│   └── state.rs                    AppState (KV binding)
-├── examples/
-│   ├── rust-client/README.md       consumer Worker pattern (Rust)
-│   └── ts-client/README.md         consumer Worker pattern (TS)
-├── data/                           test fixtures only (not the canonical state — KV is)
-├── build.rs                        connectrpc-build → src/proto codegen
-├── Cargo.toml                      cdylib + rlib, edition 2024
-├── wrangler.toml                   KV binding + cron trigger
-├── fnox.toml                       keychain-backed secret contract
-├── mise.toml                       task pipeline (cargo:*, worker:*, kv:*, dev:*)
-├── pitchfork.toml                  dev daemon supervisor
-└── CLAUDE.md                       conventions for AI agents
-```
-
-## First deploy
+Live at https://do-locator.gedw99.workers.dev
 
 ```bash
-mise run mise:install                                # install all CLIs
-fnox set -p keychain CLOUDFLARE_API_TOKEN <token>    # if not already set
-fnox set -p keychain CLOUDFLARE_ACCOUNT_ID <id>      # likewise
-mise run cf:check                                    # verify CF auth
-
-mise run kv:create                                   # → wrangler prints a namespace id
-# Paste that id into wrangler.toml's [[kv_namespaces]] `id = ""`
-mise run kv:create:preview                           # → preview id
-# Paste into wrangler.toml's `preview_id = ""`
-git commit wrangler.toml -m "wire kv ids"            # KV ids are not secrets — commit them
-
-mise run worker:deploy                               # ship
-mise run kv:bootstrap                                # populate KV before next Monday's cron
-mise run worker:tail                                 # watch logs
-```
-
-## Sanity-check a deployed instance with curl
-
-ConnectRPC speaks plain HTTP+JSON; you don't need a generated client to verify a deployment.
-
-```bash
-URL=https://do-locator.<your-account>.workers.dev
-
-# Health probe (no RPC machinery)
-curl "$URL/healthz"
-
-# Snapshot metadata — version, total colos, with-hint count
-curl -X POST "$URL/locator.v1.LocatorService/GetSnapshot" \
-  -H "Content-Type: application/json" \
-  -d '{}'
-
-# Single colo lookup
-curl -X POST "$URL/locator.v1.LocatorService/GetLocationHint" \
+curl -X POST https://do-locator.gedw99.workers.dev/locator.v1.LocatorService/GetLocationHint \
   -H "Content-Type: application/json" \
   -d '{"colo":"SYD"}'
 # → {"hint":"LOCATION_HINT_OC","known":true}
-
-# Full info
-curl -X POST "$URL/locator.v1.LocatorService/GetColoInfo" \
-  -H "Content-Type: application/json" \
-  -d '{"colo":"SYD"}'
-
-# List every colo (response is ~50KB — consumers cache this per isolate)
-curl -X POST "$URL/locator.v1.LocatorService/ListColos" \
-  -H "Content-Type: application/json" \
-  -d '{}'
 ```
 
-If `GetSnapshot` returns `503` with "snapshot not yet populated", the cron hasn't run yet — kick it manually:
+You give it a Cloudflare data-center code (the one in `request.cf.colo`, e.g. `SYD`, `LAX`, `FRA`). It tells you the best Durable Object region to place the DO in. Sydney → Oceania, LA → Western North America, Frankfurt → Eastern Europe.
+
+## Why this exists
+
+Durable Objects can be placed in specific regions via `locationHint` when you create them. **That hint is permanent.** Once a DO exists, it stays in that region for life. CF does not migrate DOs.
+
+- Pick the right region at creation → user's reads/writes stay sub-10ms forever.
+- Pick the wrong region → every read crosses an ocean, ~200ms forever.
+
+The mapping from "colo the user arrived through" → "best DO region" depends on measured latency between every CF colo and every DO region. The data shifts as CF adds POPs and reshuffles traffic. [Connor Hindley](https://github.com/connyay) (a CF engineer) maintains the measurements at [where.durableobjects.live](https://where.durableobjects.live/). This service turns those measurements into a stable, weekly-refreshed lookup with hysteresis (so noisy boundary flips don't churn the answers).
+
+**Why a service instead of a vendored library:** you have many Workers that all create DOs. One service means one weekly refresh, one observability surface, one update for all consumers when CF adds a new POP. Every consumer reads the same data via RPC and caches it locally per isolate.
+
+## How a consumer uses it
+
+```ts
+import { createClient } from "@connectrpc/connect";
+import { createConnectTransport } from "@connectrpc/connect-web";
+import { LocatorService } from "./gen/locator/v1/locator_pb.js";
+
+// Once per isolate — populate a local map from the full snapshot:
+const client = createClient(LocatorService, createConnectTransport({
+  baseUrl: "https://do-locator.gedw99.workers.dev",
+}));
+const { colos } = await client.listColos({});
+const HINTS = new Map(colos.map(c => [c.code, c.hint]));
+
+// Per request — O(1) local lookup, no RPC:
+const hint = HINTS.get(request.cf?.colo ?? "");
+env.USER_DO.newUniqueId({ locationHint: hintToString(hint) });
+```
+
+That's the whole pattern. Don't call `GetLocationHint` per request — call `ListColos` once at isolate boot and cache.
+
+Worked examples (with the funnel-helper pattern, observability log, per-DO-type policy):
+- Rust: [examples/rust-client/README.md](examples/rust-client/README.md)
+- TS: [examples/ts-client/README.md](examples/ts-client/README.md)
+
+## The locationHint-is-permanent footgun
+
+Different DO types want different "colo sources" at creation:
+
+| DO type | Use this colo source |
+|---|---|
+| Per-user state | `request.cf.colo` at signup. Sticky-good even if the user roams. |
+| Per-session / per-room | `request.cf.colo` at creation. Short-lived. |
+| Per-tenant / per-org | **NOT** the admin's request colo. Let the org owner pick a region, or defer creation to first end-user touch. |
+| Global singleton | Hardcode one hint. This service is irrelevant. |
+
+Get the per-tenant case wrong and you'll pin every org user to wherever the admin happened to be sitting. Forever. Comment the *why* at your consumer's funnel helper so the next person doesn't "fix" it back to `request.cf.colo`.
+
+Also: `idFromName` does **not** honor `locationHint` once a DO with that name exists anywhere. Only `newUniqueId({ locationHint })` actually places a new DO.
+
+## RPCs
+
+All four are POST + JSON. The service definition is in [proto/locator/v1/locator.proto](proto/locator/v1/locator.proto).
 
 ```bash
-mise run kv:bootstrap
+# Single lookup
+curl -X POST $URL/locator.v1.LocatorService/GetLocationHint \
+  -H "Content-Type: application/json" -d '{"colo":"SYD"}'
+# → {"hint":"LOCATION_HINT_OC","known":true}
+
+# Full info for one colo
+curl -X POST $URL/locator.v1.LocatorService/GetColoInfo \
+  -H "Content-Type: application/json" -d '{"colo":"FRA"}'
+# → {"colo":{"code":"FRA","name":"Frankfurt, Germany","cfRegion":"Europe","hint":"LOCATION_HINT_EEUR"},"known":true}
+
+# Every colo + snapshot version (the call consumers actually use)
+curl -X POST $URL/locator.v1.LocatorService/ListColos \
+  -H "Content-Type: application/json" -d '{}'
+
+# Metadata only
+curl -X POST $URL/locator.v1.LocatorService/GetSnapshot \
+  -H "Content-Type: application/json" -d '{}'
+# → {"snapshot":{"version":"2026-05-28","totalColos":340,"colosWithHint":278}}
 ```
 
-## Refreshing locally
+Plus a plain `GET /healthz` for liveness probes.
 
-The refresh pipeline runs **inside the Worker** — there's no nushell or Python codegen anymore. To test the logic:
+## Deploying your own
 
 ```bash
-mise run cargo:test    # unit tests for parse_iata_suffix + hysteresis
-mise run worker:dev    # local wrangler, RPC against local KV
+mise run mise:install
+fnox set -p keychain CLOUDFLARE_API_TOKEN <token>
+fnox set -p keychain CLOUDFLARE_ACCOUNT_ID <id>
+
+mise run kv:create               # → prints a namespace id
+mise run kv:create:preview       # → prints a preview id
+# Paste both ids into wrangler.toml's [[kv_namespaces]] block.
+# KV ids are not secrets; commit them.
+
+mise run worker:deploy           # build wasm + push
+curl https://<your-worker>/__refresh   # populate KV (also runs weekly via cron)
 ```
+
+## Running locally
+
+```bash
+mise run worker:dev          # wrangler dev --local on :8787
+curl http://127.0.0.1:8787/__refresh
+curl -X POST http://127.0.0.1:8787/locator.v1.LocatorService/GetLocationHint \
+  -H "Content-Type: application/json" -d '{"colo":"SYD"}'
+```
+
+`wrangler dev --local` uses a local KV emulator — separate state from prod.
+
+## How the refresh works
+
+A scheduled handler runs Mondays at 03:00 UTC, in this same Worker:
+
+1. HTTP GET `cloudflarestatus.com/api/v2/components.json` (colo names + CF region groupings).
+2. HTTP GET `where.durableobjects.live/api/v3/data.json` (measured latency per colo per DO region).
+3. Merge into one record per colo.
+4. **Hysteresis:** if a colo's nearest region flipped vs the previous snapshot, only accept the flip if the new region is at least `max(15ms, 20%)` faster than the previously-chosen one. Region-boundary colos often differ by 2-3ms between regions and the raw winner bounces every refresh — this keeps the mapping stable.
+5. Write the new snapshot JSON to KV.
+
+To trigger a refresh outside the weekly schedule: `curl <url>/__refresh`. The data is public, so the endpoint is unauthenticated.
 
 ## Credit
 
-Hysteresis approach + the data sources (cloudflarestatus.com + where.durableobjects.live) are work by [Connor Hindley](https://github.com/connyay), a Cloudflare engineer. See his Rust crate [cf-colo-hint](https://github.com/connyay/cf-colo-hint) for the vendored-library shape if you want to skip the service.
+Mapping data, the measurement infrastructure at [where.durableobjects.live](https://where.durableobjects.live/), and the hysteresis approach come from [Connor Hindley](https://github.com/connyay) (CF). His Rust crate [cf-colo-hint](https://github.com/connyay/cf-colo-hint) is the vendor-it-as-a-library alternative to this service.
 
 ## License
 

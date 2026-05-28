@@ -6,13 +6,17 @@ compatibility_date = "2026-05-01"
 command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
 
 # KV namespace holding the colo snapshot blob.
-# Bind ID is provisioned per-environment via:
-#   fnox exec -- wrangler kv:namespace create DO_LOCATOR_KV
-# then paste the returned id into the appropriate [[kv_namespaces]] below.
+#
+# First-deploy flow:
+#   1. mise run kv:create          → wrangler prints the new namespace id
+#   2. paste that id into `id` below (and commit — KV ids aren't secrets)
+#   3. mise run kv:create:preview  → prints the preview id
+#   4. paste into `preview_id` below
+#   5. mise run worker:deploy
 [[kv_namespaces]]
 binding = "DO_LOCATOR_KV"
-id = ""             # set via DO_LOCATOR_KV_NAMESPACE_ID at deploy time
-preview_id = ""     # set via DO_LOCATOR_KV_PREVIEW_ID at deploy time
+id = ""             # ← paste id from `mise run kv:create`
+preview_id = ""     # ← paste id from `mise run kv:create:preview`
 
 [vars]
 # KV key under which the snapshot JSON lives. Override per env if you

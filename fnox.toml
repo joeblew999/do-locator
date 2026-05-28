@@ -1,8 +1,14 @@
-# Secret resolution for do-locator. Values live in the macOS keychain; this
-# file declares the contract. Set values with:
+# Secret resolution for do-locator.
+# Repo: github.com/joeblew999/do-locator
+#
+# Values live in the macOS keychain; this file declares the contract. Set with:
 #   fnox set -p keychain DO_LOCATOR_KV_NAMESPACE_ID <id>
 #   fnox set -p keychain DO_LOCATOR_KV_PREVIEW_ID   <id>
 # (NEVER omit `-p keychain` — without it values get inlined as plaintext.)
+#
+# Every per-repo key is prefixed `DO_LOCATOR_` so a keychain dump shows you
+# which repo owns it. Shared CF creds (CLOUDFLARE_*) have no prefix — they
+# are deliberately shared across every joeblew999 repo (one CF account).
 
 [providers.keychain]
 type = "keychain"

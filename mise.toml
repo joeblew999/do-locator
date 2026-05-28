@@ -88,15 +88,9 @@ shell = "nu -c"
 run = "fnox exec -- wrangler dev"
 
 [tasks."worker:deploy"]
-description = "Build + deploy to prod"
+description = "Build + deploy to prod. Requires wrangler.toml's kv_namespaces id field to be filled in first (see kv:create)."
 shell = "nu -c"
-run = '''
-fnox exec -- bash -c '
-  wrangler deploy \
-    --var SNAPSHOT_KEY:snapshot \
-    --kv DO_LOCATOR_KV:$DO_LOCATOR_KV_NAMESPACE_ID
-'
-'''
+run = "fnox exec -- wrangler deploy"
 
 [tasks."worker:tail"]
 description = "Tail prod logs"

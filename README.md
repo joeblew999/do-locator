@@ -109,18 +109,16 @@ mise run mise:install                                # install all CLIs
 fnox set -p keychain CLOUDFLARE_API_TOKEN <token>    # if not already set
 fnox set -p keychain CLOUDFLARE_ACCOUNT_ID <id>      # likewise
 mise run cf:check                                    # verify CF auth
-mise run kv:create                                   # → returns KV namespace id
-fnox set -p keychain DO_LOCATOR_KV_NAMESPACE_ID <id> # save it
-mise run kv:create:preview                           # → preview namespace
-fnox set -p keychain DO_LOCATOR_KV_PREVIEW_ID <id>   # save that too
-mise run worker:deploy                               # ship it
-mise run worker:tail                                 # tail logs while cron fires
-```
 
-The first `scheduled` event won't fire until the next Monday. To bootstrap immediately, invoke the scheduled handler manually:
+mise run kv:create                                   # → wrangler prints a namespace id
+# Paste that id into wrangler.toml's [[kv_namespaces]] `id = ""`
+mise run kv:create:preview                           # → preview id
+# Paste into wrangler.toml's `preview_id = ""`
+git commit wrangler.toml -m "wire kv ids"            # KV ids are not secrets — commit them
 
-```bash
-fnox exec -- wrangler triggers schedule do-locator
+mise run worker:deploy                               # ship
+mise run kv:bootstrap                                # populate KV before next Monday's cron
+mise run worker:tail                                 # watch logs
 ```
 
 ## Sanity-check a deployed instance with curl

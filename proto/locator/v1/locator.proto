@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+// Cloudflare colo → Durable Objects locationHint lookup service.
+//
+// Backed by a KV snapshot refreshed weekly from upstream measurement data
+// (cloudflarestatus.com + where.durableobjects.live). Hint values are
+// post-hysteresis, dampened to suppress flips at region boundaries.
+//
+// Critical: locationHint is permanent at DO creation. See repo README for
+// the per-DO-type policy table.
+package locator.v1;
+
+service LocatorService {
+  // Look up the DO locationHint for a single colo IATA code.
+  // Returns hint=LOCATION_HINT_UNSPECIFIED + known=false if the colo is
+  // unknown OR has no measured mapping yet (new POP).
+  rpc GetLocationHint(GetLocationHintRequest) returns (GetLocationHintResponse);
+
+  // Full info (name, region, hint) for one colo.
+  rpc GetColoInfo(GetColoInfoRequest) returns (GetColoInfoResponse);
+
+  // All known colos with their info.
+  // Consumers should cache the response per `snapshot.version` and refetch
+  // only when expecting changes (weekly).
+  rpc ListColos(ListColosRequest) returns (ListColosResponse);
+
+  // Metadata about the current snapshot (refresh date, counts).
+  rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
+}
+
+enum LocationHint {
+  LOCATION_HINT_UNSPECIFIED = 0;
+  LOCATION_HINT_WNAM = 1;
+  LOCATION_HINT_ENAM = 2;
+  LOCATION_HINT_SAM  = 3;
+  LOCATION_HINT_WEUR = 4;
+  LOCATION_HINT_EEUR = 5;
+  LOCATION_HINT_APAC = 6;
+  LOCATION_HINT_OC   = 7;
+  LOCATION_HINT_AFR  = 8;
+  LOCATION_HINT_ME   = 9;
+}
+
+message Colo {
+  string code = 1;            // IATA, e.g. "SYD"
+  string name = 2;            // e.g. "Sydney, NSW, Australia"
+  string cf_region = 3;       // e.g. "Oceania" (informational, from CF status)
+  LocationHint hint = 4;      // post-hysteresis DO region. UNSPECIFIED = no mapping.
+}
+
+message Snapshot {
+  string version = 1;         // YYYY-MM-DD of the refresh that produced this state
+  int32 total_colos = 2;
+  int32 colos_with_hint = 3;
+}
+
+message GetLocationHintRequest {
+  string colo = 1;            // IATA code, case-sensitive (upper).
+}
+message GetLocationHintResponse {
+  LocationHint hint = 1;
+  bool known = 2;             // true iff the colo exists in the snapshot.
+}
+
+message GetColoInfoRequest {
+  string colo = 1;
+}
+message GetColoInfoResponse {
+  Colo colo = 1;              // absent if unknown.
+  bool known = 2;
+}
+
+message ListColosRequest {}
+message ListColosResponse {
+  Snapshot snapshot = 1;
+  repeated Colo colos = 2;
+}
+
+message GetSnapshotRequest {}
+message GetSnapshotResponse {
+  Snapshot snapshot = 1;
+}

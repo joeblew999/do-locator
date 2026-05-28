@@ -1,0 +1,6 @@
+# Pitchfork process supervisor — keeps the wrangler dev server running
+# in the background while you iterate. Bring up with `mise run dev:up`.
+
+[daemons.wrangler]
+run = "fnox exec -- wrangler dev --local"
+auto_restart = true

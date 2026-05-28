@@ -1,0 +1,28 @@
+name = "do-locator"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-05-01"
+
+[build]
+command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
+
+# KV namespace holding the colo snapshot blob.
+# Bind ID is provisioned per-environment via:
+#   fnox exec -- wrangler kv:namespace create DO_LOCATOR_KV
+# then paste the returned id into the appropriate [[kv_namespaces]] below.
+[[kv_namespaces]]
+binding = "DO_LOCATOR_KV"
+id = ""             # set via DO_LOCATOR_KV_NAMESPACE_ID at deploy time
+preview_id = ""     # set via DO_LOCATOR_KV_PREVIEW_ID at deploy time
+
+[vars]
+# KV key under which the snapshot JSON lives. Override per env if you
+# want a dev snapshot beside prod.
+SNAPSHOT_KEY = "snapshot"
+
+# Weekly refresh. Mondays 03:00 UTC.
+[triggers]
+crons = ["0 3 * * 1"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1.0

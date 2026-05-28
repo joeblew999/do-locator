@@ -1,0 +1,19 @@
+# Secret resolution for do-locator. Values live in the macOS keychain; this
+# file declares the contract. Set values with:
+#   fnox set -p keychain DO_LOCATOR_KV_NAMESPACE_ID <id>
+#   fnox set -p keychain DO_LOCATOR_KV_PREVIEW_ID   <id>
+# (NEVER omit `-p keychain` — without it values get inlined as plaintext.)
+
+[providers.keychain]
+type = "keychain"
+service = "fnox"
+
+[secrets]
+# Shared CF creds — keep these names stable across all joeblew999 repos.
+CLOUDFLARE_API_TOKEN  = { provider = "keychain", value = "CLOUDFLARE_API_TOKEN" }
+CLOUDFLARE_ACCOUNT_ID = { provider = "keychain", value = "CLOUDFLARE_ACCOUNT_ID" }
+
+# Per-repo prefixed secrets — isolate from other projects.
+DO_LOCATOR_WORKER_URL        = { provider = "keychain", value = "DO_LOCATOR_WORKER_URL" }
+DO_LOCATOR_KV_NAMESPACE_ID   = { provider = "keychain", value = "DO_LOCATOR_KV_NAMESPACE_ID" }
+DO_LOCATOR_KV_PREVIEW_ID     = { provider = "keychain", value = "DO_LOCATOR_KV_PREVIEW_ID" }

@@ -1,0 +1,173 @@
+[tools]
+rust = "stable"
+"aqua:nushell/nushell" = "latest"
+
+# Cloudflare Workers CLI: dev + deploys. Drives worker-build.
+"npm:wrangler" = "latest"
+
+# Rust → wasm32 bundler invoked by wrangler.
+"cargo:worker-build" = "latest"
+
+# Dev-quality tools.
+"cargo:cargo-machete" = "latest"
+
+# Pitchfork: process supervisor for dev daemons.
+"aqua:jdx/pitchfork" = "latest"
+
+[env]
+WASM_TARGET = "wasm32-unknown-unknown"
+RUST_BACKTRACE = "1"
+
+
+# =============================================================================
+# mise:* — bootstrap
+# =============================================================================
+
+[tasks."mise:install"]
+description = "Install every CLI tool declared above"
+shell = "nu -c"
+run = "mise install"
+
+
+# =============================================================================
+# cargo:* — Rust dev loop
+# =============================================================================
+
+[tasks."cargo:check"]
+description = "cargo check against the wasm32 target"
+shell = "nu -c"
+run = "cargo check --target $env.WASM_TARGET"
+
+[tasks."cargo:build"]
+description = "Build the library (debug)"
+shell = "nu -c"
+run = "cargo build --target $env.WASM_TARGET"
+
+[tasks."cargo:build:release"]
+description = "Build the library (release, optimized for Workers)"
+shell = "nu -c"
+run = "cargo build --target $env.WASM_TARGET --release"
+
+[tasks."cargo:test"]
+description = "Run native tests (refresh logic is target-agnostic)"
+shell = "nu -c"
+run = "cargo test"
+
+[tasks."cargo:lint"]
+description = "Lint with clippy (deny warnings)"
+shell = "nu -c"
+run = "cargo clippy --target $env.WASM_TARGET --all-targets -- -D warnings"
+
+[tasks."cargo:format"]
+description = "Apply rustfmt to all sources"
+shell = "nu -c"
+run = "cargo fmt --all"
+
+[tasks."cargo:machete"]
+description = "Find unused dependencies"
+shell = "nu -c"
+run = "cargo machete"
+
+[tasks."cargo:pre-commit"]
+description = "Format + lint + test + machete (run before every commit)"
+depends = ["cargo:format", "cargo:lint", "cargo:test", "cargo:machete"]
+
+
+# =============================================================================
+# worker:* — wrangler dev + deploys
+# =============================================================================
+
+[tasks."worker:dev"]
+description = "wrangler dev (local) — talks to the prod KV by default"
+shell = "nu -c"
+run = "fnox exec -- wrangler dev --local"
+
+[tasks."worker:dev:remote"]
+description = "wrangler dev against the remote runtime"
+shell = "nu -c"
+run = "fnox exec -- wrangler dev"
+
+[tasks."worker:deploy"]
+description = "Build + deploy to prod"
+shell = "nu -c"
+run = '''
+fnox exec -- bash -c '
+  wrangler deploy \
+    --var SNAPSHOT_KEY:snapshot \
+    --kv DO_LOCATOR_KV:$DO_LOCATOR_KV_NAMESPACE_ID
+'
+'''
+
+[tasks."worker:tail"]
+description = "Tail prod logs"
+shell = "nu -c"
+run = "fnox exec -- wrangler tail"
+
+
+# =============================================================================
+# kv:* — KV namespace + snapshot management
+# =============================================================================
+
+[tasks."kv:create"]
+description = "Create the prod KV namespace (run once per env). Save the returned id with `fnox set -p keychain DO_LOCATOR_KV_NAMESPACE_ID <id>`."
+shell = "nu -c"
+run = "fnox exec -- wrangler kv:namespace create DO_LOCATOR_KV"
+
+[tasks."kv:create:preview"]
+description = "Create the preview KV namespace. Save the returned id with `fnox set -p keychain DO_LOCATOR_KV_PREVIEW_ID <id>`."
+shell = "nu -c"
+run = "fnox exec -- wrangler kv:namespace create DO_LOCATOR_KV --preview"
+
+[tasks."kv:bootstrap"]
+description = "Trigger an immediate refresh of the deployed worker (POST to a wrangler-invoked scheduled run)."
+shell = "nu -c"
+run = "fnox exec -- wrangler triggers deploy --schedule '* * * * *'"
+
+[tasks."kv:dump"]
+description = "Print the current snapshot blob from KV"
+shell = "nu -c"
+run = '''
+fnox exec -- bash -c '
+  wrangler kv:key get --namespace-id=$DO_LOCATOR_KV_NAMESPACE_ID snapshot
+'
+'''
+
+
+# =============================================================================
+# cf:* — Cloudflare auth + bootstrap
+# =============================================================================
+
+[tasks."cf:check"]
+description = "Verify CF auth (whoami)"
+shell = "nu -c"
+run = "fnox exec -- wrangler whoami"
+
+
+# =============================================================================
+# dev:* — pitchfork-managed long-running daemons
+# =============================================================================
+
+[tasks."dev:up"]
+description = "Bring up wrangler dev under pitchfork supervision"
+shell = "nu -c"
+run = "pitchfork run"
+
+[tasks."dev:down"]
+description = "Stop pitchfork-managed daemons"
+shell = "nu -c"
+run = "pitchfork stop"
+
+[tasks."dev:status"]
+description = "Show daemon status"
+shell = "nu -c"
+run = "pitchfork status"
+
+
+# =============================================================================
+# proto:* — buf typecheck (for consumers; Rust side uses connectrpc-build)
+# =============================================================================
+
+[tasks."proto:lint"]
+description = "Validate the .proto file with buf (npm-local, no system buf)"
+shell = "nu -c"
+run = "npx -y @bufbuild/buf@latest lint proto"

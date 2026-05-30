@@ -115,7 +115,7 @@ run = "fnox exec -- wrangler kv namespace create DO_LOCATOR_KV --preview"
 [tasks."kv:bootstrap"]
 description = "Manually trigger the scheduled handler once (populates KV before next Monday's cron). Requires wrangler 4.18+."
 shell = "nu -c"
-run = "fnox exec -- wrangler triggers schedule do-locator"
+run = "fnox exec -- wrangler triggers schedule cf-do-locator"
 
 [tasks."kv:dump"]
 description = "Print the current snapshot blob from KV"

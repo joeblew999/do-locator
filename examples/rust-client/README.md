@@ -1,12 +1,12 @@
 # Rust consumer pattern
 
-A consumer Worker calls do-locator over ConnectRPC. The proto definition
+A consumer Worker calls cf-do-locator over ConnectRPC. The proto definition
 lives in this repo (`proto/locator/v1/locator.proto`). Consumers should
 either:
 
 1. **Vendor the proto** (git submodule) and run `connectrpc-build` in
    their own `build.rs`, OR
-2. **Path-dep the do-locator crate** if they want the server types
+2. **Path-dep the cf-do-locator crate** if they want the server types
    re-exported for tests/mocks.
 
 The pattern below assumes option 1.
@@ -26,10 +26,10 @@ worker = { version = "0.8", features = ["http"] }
 // build.rs (consumer)
 fn main() {
     connectrpc_build::Config::new()
-        .files(&["vendor/do-locator/proto/locator/v1/locator.proto"])
-        .includes(&["vendor/do-locator/proto"])
+        .files(&["vendor/cf-do-locator/proto/locator/v1/locator.proto"])
+        .includes(&["vendor/cf-do-locator/proto"])
         .compile()
-        .expect("compile do-locator proto");
+        .expect("compile cf-do-locator proto");
 }
 ```
 
@@ -78,7 +78,7 @@ pub async fn create_user_do(
 
 Every consumer Worker should cache the LocatorService response at isolate
 scope. The data only changes weekly, and KV reads from inside the locator
-service still cost a few ms per call. A consumer that RPC-calls do-locator
+service still cost a few ms per call. A consumer that RPC-calls cf-do-locator
 on every request will add 10–30ms p50 to every DO creation.
 
 Two viable patterns:

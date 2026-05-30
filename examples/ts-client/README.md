@@ -1,6 +1,6 @@
 # TS consumer pattern
 
-A consumer Worker (or browser) calls do-locator over ConnectRPC using
+A consumer Worker (or browser) calls cf-do-locator over ConnectRPC using
 `@connectrpc/connect-web` + `@bufbuild/protobuf` clients generated from
 `proto/locator/v1/locator.proto`.
 
@@ -28,7 +28,7 @@ A consumer Worker (or browser) calls do-locator over ConnectRPC using
 # consumer buf.gen.yaml
 version: v2
 inputs:
-  - directory: ../do-locator/proto    # git submodule path
+  - directory: ../cf-do-locator/proto    # git submodule path
 plugins:
   - local: protoc-gen-es
     out: src/gen
@@ -69,7 +69,7 @@ async function ensureColos(env: Env): Promise<Map<string, LocationHint>> {
 
 interface Env {
   USER_DO: DurableObjectNamespace;
-  DO_LOCATOR_URL: string;  // e.g. "https://do-locator.<account>.workers.dev"
+  DO_LOCATOR_URL: string;  // e.g. "https://cf-do-locator.<account>.workers.dev"
 }
 
 export async function createUserDO(

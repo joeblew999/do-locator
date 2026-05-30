@@ -1,4 +1,4 @@
-# do-locator
+# cf-do-locator
 
 ## TL;DR
 
@@ -31,7 +31,7 @@ That mapping (edge → region) isn't obvious. It comes from latency measurements
 A web service. You ask it "given edge X, what region should I use?" It answers.
 
 ```bash
-curl -X POST https://do-locator.gedw99.workers.dev/locator.v1.LocatorService/GetLocationHint \
+curl -X POST https://cf-do-locator.gedw99.workers.dev/locator.v1.LocatorService/GetLocationHint \
   -H "Content-Type: application/json" \
   -d '{"colo":"SYD"}'
 # → {"hint":"LOCATION_HINT_OC","known":true}
@@ -70,7 +70,7 @@ Getting this wrong silently locks your customers into a slow path for the lifeti
 
 ## Endpoints
 
-The service lives at https://do-locator.gedw99.workers.dev.
+The service lives at https://cf-do-locator.gedw99.workers.dev.
 
 | Endpoint | What it returns |
 |---|---|

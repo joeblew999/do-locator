@@ -1,5 +1,5 @@
-# Secret resolution for do-locator.
-# Repo: github.com/joeblew999/do-locator
+# Secret resolution for cf-do-locator.
+# Repo: github.com/joeblew999/cf-do-locator
 #
 # Values live in the macOS keychain; this file declares the contract. Set with:
 #   fnox set -p keychain DO_LOCATOR_KV_NAMESPACE_ID <id>

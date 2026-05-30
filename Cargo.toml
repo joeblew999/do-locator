@@ -1,12 +1,12 @@
 [package]
-name = "do-locator"
+name = "cf-do-locator"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Joe Blew <gedw99@gmail.com>"]
 description = "Cloudflare colo → Durable Objects locationHint lookup service (ConnectRPC on Workers, KV-backed)"
 license = "MIT"
-repository = "https://github.com/joeblew999/do-locator"
+repository = "https://github.com/joeblew999/cf-do-locator"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

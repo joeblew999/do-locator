@@ -1,94 +1,85 @@
-# Rust consumer pattern
+# cf-do-locator Rust consumer example
 
-A consumer Worker calls cf-do-locator over ConnectRPC. The proto definition
-lives in this repo (`proto/locator/v1/locator.proto`). Consumers should
-either:
+A runnable demonstration of the consumer pattern: call `ListColos` once at boot, cache the table, do O(1) local lookups per request.
 
-1. **Vendor the proto** (git submodule) and run `connectrpc-build` in
-   their own `build.rs`, OR
-2. **Path-dep the cf-do-locator crate** if they want the server types
-   re-exported for tests/mocks.
+## Run it
 
-The pattern below assumes option 1.
+Against local wrangler dev (default URL `http://127.0.0.1:8787`):
 
-```toml
-# Consumer Cargo.toml
-[build-dependencies]
-connectrpc-build = "0.4"
-
-[dependencies]
-connectrpc = { version = "0.4", default-features = false }
-buffa = { version = "0.5", features = ["json"] }
-worker = { version = "0.8", features = ["http"] }
+```bash
+cargo run
 ```
 
+Against the live service:
+
+```bash
+CF_DO_LOCATOR_URL=https://cf-do-locator.gedw99.workers.dev cargo run
+```
+
+Expected output:
+
+```
+→ cache.load() from http://127.0.0.1:8787
+  snapshot version: 2026-05-28
+  colos cached:     340
+
+  SYD  →  oc
+  LAX  →  wnam
+  FRA  →  eeur
+  JNB  →  afr
+  XXX  →  (unknown — create DO without hint, log it)
+```
+
+## Files
+
+- [`src/lib.rs`](src/lib.rs) — the reusable `LocatorCache` struct. Copy this into your Worker.
+- [`src/main.rs`](src/main.rs) — the demo driver.
+
+## Using `LocatorCache` in a real workers-rs Worker
+
+The demo CLI uses `ureq` (sync, native) so it runs as a plain `cargo run`. In a real Worker you'd swap the transport for `worker::Fetch` but keep the same struct + cache pattern:
+
 ```rust
-// build.rs (consumer)
-fn main() {
-    connectrpc_build::Config::new()
-        .files(&["vendor/cf-do-locator/proto/locator/v1/locator.proto"])
-        .includes(&["vendor/cf-do-locator/proto"])
-        .compile()
-        .expect("compile cf-do-locator proto");
+use std::sync::OnceLock;
+
+static CACHE: OnceLock<LocatorCache> = OnceLock::new();
+
+async fn locator(env: &worker::Env) -> worker::Result<&'static LocatorCache> {
+    if let Some(c) = CACHE.get() {
+        return Ok(c);
+    }
+    let url = env.var("CF_DO_LOCATOR_URL")?.to_string();
+    let mut c = LocatorCache::new(url);
+    c.load_via_worker_fetch().await?;   // your Worker-flavoured load()
+    Ok(CACHE.get_or_init(|| c))
 }
-```
 
-Then in the consumer's DO-creation funnel (one helper per crate):
-
-```rust
-use locator::v1::{GetLocationHintRequest, LocationHint, LocatorServiceClient};
-
+// In your DO-creation funnel:
 pub async fn create_user_do(
+    req: &worker::Request,
     env: &worker::Env,
     user_id: &str,
-    req: &worker::Request,
 ) -> worker::Result<worker::Stub> {
+    let cache = locator(env).await?;
     let colo = req.cf().and_then(|cf| cf.colo()).unwrap_or_default();
-
-    // Cache the client at isolate level — see CACHING below.
-    let client = locator_client(env)?;
-    let resp = client
-        .get_location_hint(GetLocationHintRequest { colo: colo.clone(), ..Default::default() })
-        .await?;
+    let hint = cache.hint_for(&colo);
 
     let ns = env.durable_object("USER_DO")?;
-    let id = match resp.hint.value() {
-        LocationHint::LOCATION_HINT_UNSPECIFIED | _ if !resp.known => {
-            // Unknown colo or no mapping yet — log and create without hint.
-            worker::console_log!("do_creation colo={} hint=none user={}", colo, user_id);
-            ns.id_from_name(user_id)?
-        }
-        _ => {
-            let hint_str = location_hint_to_str(resp.hint.value());
-            worker::console_log!(
-                "do_creation colo={} hint={} user={}",
-                colo, hint_str, user_id
-            );
-            // NOTE: id_from_name doesn't take a locationHint. To actually
-            // place a NEW DO by hint, use unique_id with options. See
-            // workers-rs DurableObjectId::unique_id_with_options.
-            ns.id_from_name(user_id)?
-        }
-    };
+    // ⚠️  hint is only honoured by unique_id, NOT id_from_name.
+    let id = ns.unique_id_with_options(/* { locationHint: hint } */)?;
+    // Observability: log {colo, hint, do_type, do_id} here.
     id.get_stub()
 }
 ```
 
-## CACHING — read this before deploying
+## Per-DO-type policy
 
-Every consumer Worker should cache the LocatorService response at isolate
-scope. The data only changes weekly, and KV reads from inside the locator
-service still cost a few ms per call. A consumer that RPC-calls cf-do-locator
-on every request will add 10–30ms p50 to every DO creation.
+Different DO types want different "colo sources" — see the [parent README's "one footgun" section](../../README.md#the-one-footgun). Briefly:
 
-Two viable patterns:
+- Per-user — use `req.cf.colo` at signup.
+- Per-team / per-org — do **not** use the admin's edge; let the team owner pick a region.
+- Per-session / per-room — use the creator's edge.
 
-1. **Call `ListColos` once at isolate init**, populate a local `HashMap`,
-   serve all subsequent lookups from memory. Tolerate up to one
-   isolate-lifetime of staleness (typically minutes-to-hours).
-2. **Use the CF `Cache` API** to memoize the `ListColos` response with a
-   ~1h TTL. Slower than option 1 but doesn't require a singleton.
+## Typed proto client (optional)
 
-Don't call `GetLocationHint` per request. The service supports it for
-ad-hoc lookups (CLI tools, observability checks) but it's not the
-intended hot-path API.
+This demo uses raw `ureq` + serde, which works because ConnectRPC accepts plain HTTP + JSON natively. For a fully-typed Rust client, add `connectrpc-build` to a `build.rs` pointing at `../../proto`. The cache + lookup pattern doesn't change — only the wire encoding does.

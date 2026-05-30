@@ -1,0 +1,21 @@
+[package]
+name = "cf-do-locator-rust-example"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Runnable Rust demo of the cf-do-locator consumer pattern (call once, cache, lookup locally)."
+
+[[bin]]
+name = "demo"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Synchronous HTTP — keeps the demo tiny and dep-light. A real Worker
+# consumer compiles to wasm32 and uses `worker::Fetch` instead; the
+# cache+lookup pattern is identical.
+ureq       = { version = "2.10", default-features = false, features = ["tls"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"

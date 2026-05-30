@@ -1,111 +1,84 @@
-# TS consumer pattern
+# cf-do-locator TS consumer example
 
-A consumer Worker (or browser) calls cf-do-locator over ConnectRPC using
-`@connectrpc/connect-web` + `@bufbuild/protobuf` clients generated from
-`proto/locator/v1/locator.proto`.
+A runnable demonstration of the consumer pattern: call `ListColos` once at boot, cache the table in memory, do O(1) local lookups per request.
 
-## Setup
+## Run it
 
-```json
-// consumer package.json
-{
-  "scripts": {
-    "proto:gen": "buf generate"
-  },
-  "devDependencies": {
-    "@bufbuild/buf": "latest",
-    "@bufbuild/protoc-gen-es": "latest"
-  },
-  "dependencies": {
-    "@connectrpc/connect": "latest",
-    "@connectrpc/connect-web": "latest",
-    "@bufbuild/protobuf": "latest"
-  }
-}
+Against local wrangler dev (default URL `http://127.0.0.1:8787`):
+
+```bash
+npm install
+npm run demo
 ```
 
-```yaml
-# consumer buf.gen.yaml
-version: v2
-inputs:
-  - directory: ../cf-do-locator/proto    # git submodule path
-plugins:
-  - local: protoc-gen-es
-    out: src/gen
-    opt: target=ts
+Against the live service:
+
+```bash
+npm run demo:prod
 ```
 
-## DO-creation funnel — one helper per Worker
+Expected output:
+
+```
+→ cache.load() from http://127.0.0.1:8787
+  snapshot version: 2026-05-28
+  colos cached:     340
+
+  SYD  →  oc
+  LAX  →  wnam
+  FRA  →  eeur
+  JNB  →  afr
+  XXX  →  (unknown — create DO without hint, log it)
+```
+
+## Files
+
+- [`src/lookup.ts`](src/lookup.ts) — the reusable `LocatorCache` class. Copy this into your Worker.
+- [`src/cli.ts`](src/cli.ts) — the demo driver.
+
+## Using `LocatorCache` in a real Worker
 
 ```ts
-import { createClient } from "@connectrpc/connect";
-import { createConnectTransport } from "@connectrpc/connect-web";
-import { LocatorService, LocationHint } from "./gen/locator/v1/locator_pb.js";
+import { LocatorCache } from "./lookup.ts";
 
-// Cache at module scope — one client per isolate.
-let _client: ReturnType<typeof createClient<typeof LocatorService>> | null = null;
-let _colos: Map<string, LocationHint> | null = null;
-
-function getLocatorClient(env: Env) {
-  if (!_client) {
-    _client = createClient(
-      LocatorService,
-      createConnectTransport({ baseUrl: env.DO_LOCATOR_URL }),
-    );
+// Module scope — one cache per isolate. Lazy-init on first request.
+let _cache: LocatorCache | null = null;
+async function locator(env: Env): Promise<LocatorCache> {
+  if (!_cache) {
+    _cache = new LocatorCache(env.CF_DO_LOCATOR_URL);
+    await _cache.load();
   }
-  return _client;
+  return _cache;
 }
 
-// Populate the in-isolate map once. Subsequent requests are O(1) memory lookups,
-// not RPCs.
-async function ensureColos(env: Env): Promise<Map<string, LocationHint>> {
-  if (!_colos) {
-    const client = getLocatorClient(env);
-    const { colos } = await client.listColos({});
-    _colos = new Map(colos.map((c) => [c.code, c.hint]));
-  }
-  return _colos;
-}
-
-interface Env {
-  USER_DO: DurableObjectNamespace;
-  DO_LOCATOR_URL: string;  // e.g. "https://cf-do-locator.<account>.workers.dev"
-}
-
-export async function createUserDO(
-  request: Request,
-  env: Env,
-  userId: string,
-): Promise<DurableObjectStub> {
-  const colo = (request.cf?.colo as string | undefined) ?? "";
-  const colos = await ensureColos(env);
-  const hint = colos.get(colo);
-
-  // `idFromName` is deterministic and won't honour locationHint after first
-  // creation. For NEW DOs that should be placed by hint, use `newUniqueId`.
-  const id = env.USER_DO.idFromName(userId);
-
-  console.log(
-    "do_creation",
-    JSON.stringify({
-      colo,
-      hint: hint === undefined || hint === LocationHint.UNSPECIFIED
-        ? null
-        : LocationHint[hint],
-      do_type: "user",
-      do_id: id.toString(),
-      ts: Date.now(),
-    }),
+// In your DO-creation funnel:
+export async function createUserDO(req: Request, env: Env, userId: string) {
+  const cache = await locator(env);
+  const hint = cache.hintFor(req.cf?.colo ?? "");
+  // ⚠️  hint is only honoured by newUniqueId, NOT idFromName.
+  const id = env.USER_DO.newUniqueId(
+    hint ? { locationHint: hint } : undefined,
   );
-
+  // Observability: log {colo, hint, do_type, do_id} here.
   return env.USER_DO.get(id);
 }
 ```
 
-## Don't call GetLocationHint per request
+## Per-DO-type policy
 
-`ListColos` returns ~340 colos at ~50KB. One call per isolate is fine.
-`GetLocationHint` per DO creation is what you want to AVOID — it adds
-10–30ms p50 to every creation path. The intended API is ListColos +
-local cache; GetLocationHint exists for CLI tools and observability
-checks.
+Different DO types want different "colo sources" — see the [parent README's "one footgun" section](../../README.md#the-one-footgun). Briefly:
+
+- Per-user — use `req.cf.colo` at signup.
+- Per-team / per-org — do **not** use the admin's edge; let the team owner pick a region.
+- Per-session / per-room — use the creator's edge.
+
+## Typed client (optional)
+
+This demo uses raw `fetch` + JSON, which works because ConnectRPC accepts that natively. For a fully-typed client you can generate one from the proto:
+
+```bash
+npx -y @bufbuild/buf@latest generate
+# uses ../../buf.gen.yaml against ../../proto/locator/v1/locator.proto
+```
+
+The output drops into `gen/`. Then import the `LocatorService` client from `@connectrpc/connect` and replace the raw `fetch` calls. The cache+lookup pattern stays the same.

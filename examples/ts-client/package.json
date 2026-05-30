@@ -1,0 +1,15 @@
+{
+  "name": "cf-do-locator-ts-example",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Runnable TS demo of the cf-do-locator consumer pattern (call once at boot, cache, lookup locally).",
+  "scripts": {
+    "demo": "tsx src/cli.ts",
+    "demo:prod": "CF_DO_LOCATOR_URL=https://cf-do-locator.gedw99.workers.dev tsx src/cli.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

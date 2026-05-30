@@ -1,85 +1,109 @@
-# cf-do-locator Rust consumer example
+# cf-do-locator Rust consumer
 
-A runnable demonstration of the consumer pattern: call `ListColos` once at boot, cache the table, do O(1) local lookups per request.
+The reusable cache + funnel helpers that any workers-rs Worker should adopt to get DOs placed in the right region.
 
-## Run it
-
-Against local wrangler dev (default URL `http://127.0.0.1:8787`):
+## Drop it into your Worker
 
 ```bash
-cargo run
+mkdir -p src/locator
+curl -L https://raw.githubusercontent.com/joeblew999/cf-do-locator/main/examples/rust-client/src/lib.rs \
+  -o src/locator/mod.rs
 ```
 
-Against the live service:
+Then add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+ureq       = { version = "2.10", default-features = false, features = ["tls"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+```
+
+For a wasm32 Workers build, swap `ureq` for `worker::Fetch` (the loader is the only thing that needs changing — the cache + funnel API are identical). The CLI demo uses `ureq` so `cargo run` works natively.
+
+## Wire it in
+
+```rust
+// src/worker.rs (or wherever your fetch handler lives)
+use std::sync::OnceLock;
+use crate::locator::{CreationLog, LocatorCache, create_user_do, create_tenant_do};
+
+// One cache per isolate.
+static CACHE: OnceLock<LocatorCache> = OnceLock::new();
+
+fn locator(env: &worker::Env) -> worker::Result<&'static LocatorCache> {
+    Ok(CACHE.get_or_init(|| {
+        let url = env
+            .var("CF_DO_LOCATOR_URL")
+            .expect("CF_DO_LOCATOR_URL")
+            .to_string();
+        let mut c = LocatorCache::new(url);
+        c.load().expect("ListColos");
+        c
+    }))
+}
+
+fn log_creation(e: CreationLog) {
+    worker::console_log!("do_creation {:?}", e);
+}
+
+// ── DO-creation funnel — every DO creation in your crate should go
+//    through one of these helpers. They enforce per-DO-type policy at the
+//    type level (e.g. create_tenant_do can't take a request colo). ──
+
+pub fn signup(req: &worker::Request, env: &worker::Env, user_id: &str) -> worker::Result<()> {
+    let cache  = locator(env)?;
+    let colo   = req.cf().map(|cf| cf.colo()).unwrap_or_default();
+    let _do_id = create_user_do(cache, &colo, user_id, log_creation);
+    // Real code: env.durable_object("USER_DO")?.unique_id_with_options(...).
+    Ok(())
+}
+
+pub fn provision_org(env: &worker::Env, tenant_id: &str, owner_region: &str) -> worker::Result<()> {
+    // NOT request.cf.colo — admin might be in Singapore provisioning a
+    // US-based team. Hint binds at creation and is permanent.
+    let _do_id = create_tenant_do(owner_region, tenant_id, log_creation);
+    Ok(())
+}
+```
+
+## See it work — run the demo CLI
+
+The same library powers a CLI demo that exercises every RPC and every funnel helper. Run against either local `wrangler dev` or the live service.
 
 ```bash
-CF_DO_LOCATOR_URL=https://cf-do-locator.gedw99.workers.dev cargo run
+cd examples/rust-client
+cargo run                                                              # → http://127.0.0.1:8787
+CF_DO_LOCATOR_URL=https://cf-do-locator.gedw99.workers.dev cargo run    # → prod
 ```
 
-Expected output:
+Output (the canonical sanity check):
 
 ```
-→ cache.load() from http://127.0.0.1:8787
-  snapshot version: 2026-05-28
-  colos cached:     340
+── GetSnapshot ─────────────────────────────────────────────────
+  version:         2026-05-30
+  total colos:     340
+  colos with hint: 277
 
-  SYD  →  oc
-  LAX  →  wnam
-  FRA  →  eeur
-  JNB  →  afr
-  XXX  →  (unknown — create DO without hint, log it)
+── ListColos → LocatorCache ────────────────────────────────────
+  cached 340 colos (snapshot 2026-05-30)
+
+── Funnel pattern: per-user DO (use request.cf.colo) ───────────
+    [log] user     colo=SYD  hint=oc    do_id=do-oc-...
+    [log] user     colo=LAX  hint=wnam  do_id=do-wnam-...
+
+── Funnel pattern: per-tenant DO (NEVER use admin's edge) ──────
+    [log] tenant   colo=_explicit_  hint=wnam  do_id=do-wnam-...
+
+── Funnel pattern: per-session DO (creator's edge is fine) ─────
+    [log] session  colo=FRA  hint=eeur  do_id=do-eeur-...
+
+── Edge cases ──────────────────────────────────────────────────
+    [log] user     colo=XXX  hint=(none)  do_id=do-auto-...
+    [log] user     colo=     hint=(none)  do_id=do-auto-...
 ```
 
 ## Files
 
-- [`src/lib.rs`](src/lib.rs) — the reusable `LocatorCache` struct. Copy this into your Worker.
-- [`src/main.rs`](src/main.rs) — the demo driver.
-
-## Using `LocatorCache` in a real workers-rs Worker
-
-The demo CLI uses `ureq` (sync, native) so it runs as a plain `cargo run`. In a real Worker you'd swap the transport for `worker::Fetch` but keep the same struct + cache pattern:
-
-```rust
-use std::sync::OnceLock;
-
-static CACHE: OnceLock<LocatorCache> = OnceLock::new();
-
-async fn locator(env: &worker::Env) -> worker::Result<&'static LocatorCache> {
-    if let Some(c) = CACHE.get() {
-        return Ok(c);
-    }
-    let url = env.var("CF_DO_LOCATOR_URL")?.to_string();
-    let mut c = LocatorCache::new(url);
-    c.load_via_worker_fetch().await?;   // your Worker-flavoured load()
-    Ok(CACHE.get_or_init(|| c))
-}
-
-// In your DO-creation funnel:
-pub async fn create_user_do(
-    req: &worker::Request,
-    env: &worker::Env,
-    user_id: &str,
-) -> worker::Result<worker::Stub> {
-    let cache = locator(env).await?;
-    let colo = req.cf().and_then(|cf| cf.colo()).unwrap_or_default();
-    let hint = cache.hint_for(&colo);
-
-    let ns = env.durable_object("USER_DO")?;
-    // ⚠️  hint is only honoured by unique_id, NOT id_from_name.
-    let id = ns.unique_id_with_options(/* { locationHint: hint } */)?;
-    // Observability: log {colo, hint, do_type, do_id} here.
-    id.get_stub()
-}
-```
-
-## Per-DO-type policy
-
-Different DO types want different "colo sources" — see the [parent README's "one footgun" section](../../README.md#the-one-footgun). Briefly:
-
-- Per-user — use `req.cf.colo` at signup.
-- Per-team / per-org — do **not** use the admin's edge; let the team owner pick a region.
-- Per-session / per-room — use the creator's edge.
-
-## Typed proto client (optional)
-
-This demo uses raw `ureq` + serde, which works because ConnectRPC accepts plain HTTP + JSON natively. For a fully-typed Rust client, add `connectrpc-build` to a `build.rs` pointing at `../../proto`. The cache + lookup pattern doesn't change — only the wire encoding does.
+- [`src/lib.rs`](src/lib.rs) — the file you vendor into your Worker (rename to `mod.rs` per the snippet above).
+- [`src/main.rs`](src/main.rs) — the demo driver (don't vendor; just for `cargo run`).
